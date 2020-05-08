@@ -19,8 +19,8 @@ drupal8ci_install() {
 	set -ex
 	# Download and extract CircleCI configuration and sample tests.
 	wget -O "$tmpdir/master.zip" https://github.com/kporras07/drupal8ci/archive/master.zip
-	unzip "$tmpdir/master.zip" 'drupal8ci-master/dist/circleci/*' -d "$tmpdir"
-	rsync -va --ignore-existing "$tmpdir/drupal8ci-master/dist/circleci/" .
+	unzip "$tmpdir/master.zip" 'drupal8ci-master/dist/circleci-pantheon/*' -d "$tmpdir"
+	rsync -va --ignore-existing "$tmpdir/drupal8ci-master/dist/circleci-pantheon/" .
 
     composer require --dev \
         overtrue/phplint \

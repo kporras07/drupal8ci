@@ -26,6 +26,9 @@ drupal8ci_install() {
         overtrue/phplint \
         drupal/coder \
         dealerdirect/phpcodesniffer-composer-installer
+
+	echo "CI Installed. You need to setup these environment vars in CircleCI:\n"
+	echo "\$DOMAIN_NAME, \$INSTALLATION_PROFILE, \$SITE_UUID, \$PANTHEON_TOKEN, \$COMMIT_EMAIL, \$COMMIT_NAME, \$PANTHEON_SITE"
 }
 
 #######################################

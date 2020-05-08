@@ -1,0 +1,230 @@
+version: 2
+jobs:
+  build:
+    docker:
+      - image: kporras07/docker-drupal-nginx:php-7.4.x
+      - image: selenium/standalone-chrome-debug:3.6.0
+      - image: kporras07/lighthouse-ci:nonheadless
+      - image: mariadb:5.5
+        environment:
+          MYSQL_DATABASE: drupal
+          MYSQL_ROOT_PASSWORD: drupal
+    working_directory: /var/www/site
+    steps:
+      - run: apt-get update -y && apt-get install python -y
+      - run: echo 127.0.0.1 $DOMAIN_NAME | tee -a /etc/hosts
+      - checkout
+      - restore_cache:
+          keys:
+            - npm-cache-{{ checksum "package.json" }}
+            - composer-cache-{{ checksum "composer.lock" }}
+      - run: npm install
+      - save_cache:
+         key: npm-cache-{{ checksum "package.json" }}
+         paths:
+           - node_modules
+      - run:
+          name: Install Composer
+          command: |
+            php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" && \
+            php -r "copy('https://composer.github.io/installer.sig', 'composer-setup.sig');" && \
+            php -r "if (hash_file('SHA384', 'composer-setup.php') === trim(file_get_contents('composer-setup.sig'))) { echo 'Installer verified'; } else { echo 'Installer corrupt'; unlink('composer-setup.php'); } echo PHP_EOL;" && \
+            php composer-setup.php && \
+            php -r "unlink('composer-setup.php');"
+            mv composer.phar /usr/bin/composer
+      - run:
+          name: Configure Nginx
+          command: |
+            cp ./.circleci/site /etc/nginx/sites-available/default
+      - run:
+          name: Build site.
+          command: |
+            cp ./.circleci/settings.secret.php ./settings/
+            composer install
+            chmod 777 -R ./web/sites/default/files
+            cd web
+            /usr/bin/env PHP_OPTIONS="-d sendmail_path=`which true`" ../vendor/bin/drush si $INSTALLATION_PROFILE -y ; ../vendor/bin/drush config-set "system.site" uuid $SITE_UUID -y ; ../vendor/bin/drush cim -y 
+            cd /var/www/site
+      - run:
+          name: Coding Standards Linters
+          command: |
+            ./vendor/bin/phplint web
+            ./vendor/bin/phpcs web/modules web/themes
+            ./bin/phpcs --standard=Drupal,DrupalPractice ./web/themes ./web/modules
+            cd core
+            npm install -g yarn
+            yarn install
+            npm run lint:core-js ../themes/
+      - persist_to_workspace:
+          root: /var/www/
+          paths: site
+
+  deploy:
+    docker:
+      - image: kporras07/docker-drupal-nginx:php-7.4.x
+    working_directory: /var/www/site
+    steps:
+      - attach_workspace:
+          at: /var/www
+      - run:
+          name: Install Composer
+          command: |
+            php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" && \
+            php -r "copy('https://composer.github.io/installer.sig', 'composer-setup.sig');" && \
+            php -r "if (hash_file('SHA384', 'composer-setup.php') === trim(file_get_contents('composer-setup.sig'))) { echo 'Installer verified'; } else { echo 'Installer corrupt'; unlink('composer-setup.php'); } echo PHP_EOL;" && \
+            php composer-setup.php && \
+            php -r "unlink('composer-setup.php');"
+            mv composer.phar /usr/bin/composer
+      - add_ssh_keys:
+          fingerprints:
+      - run:
+          name: Install and login terminus
+          command: |
+            mkdir terminus && cd terminus
+            curl -O https://raw.githubusercontent.com/pantheon-systems/terminus-installer/master/builds/installer.phar && php installer.phar install
+            ln -s /var/www/site/terminus/vendor/bin/terminus /usr/bin/terminus
+            terminus auth:login --machine-token=$PANTHEON_TOKEN
+      - run:
+          name: Deploy
+          command: |
+            git config --global user.email "${COMMIT_EMAIL}"
+            git config --global user.name "${COMMIT_NAME}"
+            echo 'Host *' >> /root/.ssh/config
+            echo '   StrictHostKeyChecking no' >> /root/.ssh/config
+            terminus connection:set  ${PANTHEON_SITE}.dev git
+            ahoy site deploy master "Auto deploy triggered from master branch"
+            terminus connection:set  ${PANTHEON_SITE}.dev sftp
+            terminus drush ${PANTHEON_SITE}.dev -- si ${INSTALLATION_PROFILE} --account-pass=admin -y
+            terminus connection:set ${PANTHEON_SITE}.dev git
+            terminus drush ${PANTHEON_SITE}.dev -- config-set "system.site" uuid "$SITE_UUID" -y
+            terminus drush ${PANTHEON_SITE}.dev -- cim -y
+            terminus drush ${PANTHEON_SITE}.dev -- cr
+  deploy-test:
+    docker:
+      - image: kporras07/docker-drupal-nginx:php-7.4.x
+    working_directory: /var/www/site
+    steps:
+      - run:
+          name: Install and login terminus
+          command: |
+            echo 'Host *' >> /root/.ssh/config
+            echo '   StrictHostKeyChecking no' >> /root/.ssh/config
+            mkdir terminus && cd terminus
+            curl -O https://raw.githubusercontent.com/pantheon-systems/terminus-installer/master/builds/installer.phar && php installer.phar install
+            ln -s /var/www/site/terminus/vendor/bin/terminus /usr/bin/terminus
+            terminus auth:login --machine-token=$PANTHEON_TOKEN
+            terminus env:deploy ${PANTHEON_SITE}.test --note "Autodeploy from Circle" -y
+            terminus drush ${PANTHEON_SITE}.test -- updb -y
+            terminus drush ${PANTHEON_SITE}.test -- cim -y
+            terminus drush ${PANTHEON_SITE}.test -- cr
+  deploy-live:
+    docker:
+      - image: kporras07/docker-drupal-nginx:php-7.4.x
+    working_directory: /var/www/site
+    steps:
+      - run:
+          name: Install and login terminus
+          command: |
+            echo 'Host *' >> /root/.ssh/config
+            echo '   StrictHostKeyChecking no' >> /root/.ssh/config
+            mkdir terminus && cd terminus
+            curl -O https://raw.githubusercontent.com/pantheon-systems/terminus-installer/master/builds/installer.phar && php installer.phar install
+            ln -s /var/www/site/terminus/vendor/bin/terminus /usr/bin/terminus
+            terminus auth:login --machine-token=$PANTHEON_TOKEN
+            terminus env:deploy ${PANTHEON_SITE}.live --note "Autodeploy from Circle" -y
+            terminus drush ${PANTHEON_SITE}.live -- updb -y
+            terminus drush ${PANTHEON_SITE}.live -- cim -y
+            terminus drush ${PANTHEON_SITE}.live -- cr
+
+  deploy-multidev:
+    docker:
+      - image: kporras07/docker-drupal-nginx:php-7.4.x
+    working_directory: /var/www/site
+    steps:
+      - checkout
+      - run:
+          name: Install Composer and terminus
+          command: |
+            php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" && \
+            php -r "copy('https://composer.github.io/installer.sig', 'composer-setup.sig');" && \
+            php -r "if (hash_file('SHA384', 'composer-setup.php') === trim(file_get_contents('composer-setup.sig'))) { echo 'Installer verified'; } else { echo 'Installer corrupt'; unlink('composer-setup.php'); } echo PHP_EOL;" && \
+            php composer-setup.php && \
+            php -r "unlink('composer-setup.php');"
+            mv composer.phar /usr/bin/composer
+            mkdir $HOME/terminus && cd $HOME/terminus
+            curl -O https://raw.githubusercontent.com/pantheon-systems/terminus-installer/master/builds/installer.phar && php installer.phar install
+            ln -s $HOME/terminus/vendor/bin/terminus /usr/bin/terminus
+            terminus auth:login --machine-token=$PANTHEON_TOKEN
+            cd /var/www/site
+      - run: composer install
+      - add_ssh_keys:
+          fingerprints:
+      - run:
+          name: Create multidev environment
+          command: |
+            NEWBRANCH=$CIRCLE_BRANCH
+            LENGTH=${#NEWBRANCH}
+            if [ LENGTH > 10 ] ; then NEWBRANCH=${NEWBRANCH:8:9} ; fi
+            NEWBRANCH=${NEWBRANCH//-/}
+            NEWBRANCH=${NEWBRANCH,,}
+            terminus multidev:create ${PANTHEON_SITE}.live $NEWBRANCH || true
+      - run:
+          name: Deploy
+          command: |
+            NEWBRANCH=$CIRCLE_BRANCH
+            LENGTH=${#NEWBRANCH}
+            if [ LENGTH > 10 ] ; then NEWBRANCH=${NEWBRANCH:8:9} ; fi
+            NEWBRANCH=${NEWBRANCH//-/}
+            NEWBRANCH=${NEWBRANCH,,}
+            git config --global user.email "${COMMIT_EMAIL}"
+            git config --global user.name "${COMMIT_NAME}"
+            echo 'Host *' >> /root/.ssh/config
+            echo '   StrictHostKeyChecking no' >> /root/.ssh/config
+            ahoy site deploy $NEWBRANCH "Auto deploy triggered from master branch"
+      - run:
+          name: Deploy commands
+          command: |
+            NEWBRANCH=$CIRCLE_BRANCH
+            LENGTH=${#NEWBRANCH}
+            if [ LENGTH > 10 ] ; then NEWBRANCH=${NEWBRANCH:8:9} ; fi
+            NEWBRANCH=${NEWBRANCH//-/}
+            NEWBRANCH=${NEWBRANCH,,}
+            terminus drush ${PANTHEON_SITE}.$NEWBRANCH -- cr
+            terminus drush ${PANTHEON_SITE}.$NEWBRANCH -- sqlsan -y
+            terminus drush ${PANTHEON_SITE}.$NEWBRANCH -- updb -y
+            terminus drush ${PANTHEON_SITE}.$NEWBRANCH -- cim -y
+            terminus drush ${PANTHEON_SITE}.$NEWBRANCH -- cr
+            terminus lock:enable ${PANTHEON_SITE}.$NEWBRANCH -- $PANTHEON_WEB_AUTH_USER $PANTHEON_WEB_AUTH_PASS
+            echo "If everything worked, go to http://$NEWBRANCH-${PANTHEON_SITE}.pantheonsite.io"
+workflows:
+  version: 2
+  build-deploys:
+    jobs:
+      - build
+      - deploy:
+          requires:
+            - build
+          filters:
+            branches:
+              only: master
+      - deploy-multidev-hold:
+          type: approval
+          requires:
+            - build
+          filters:
+            branches:
+              only:
+                - /feature\/.*/
+      - deploy-multidev:
+          requires:
+            - deploy-multidev-hold
+      - deploy-test:
+          requires:
+            - deploy
+      - deploy-live-hold:
+          type: approval
+          requires:
+            - deploy-test
+      - deploy-live:
+          requires:
+            - deploy-live-hold
